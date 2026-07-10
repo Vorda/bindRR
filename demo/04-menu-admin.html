@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BindRR Demo — Menu Admin</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 60px auto; padding: 0 20px; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    .toolbar button { padding: 8px 18px; font-size: .95rem; cursor: pointer; }
+
+    /* Outer grid: responsive card columns. Each card spans the same number of row
+       tracks and uses grid-template-rows: subgrid, so the thumbnail/name/description/
+       actions rows line up across every card regardless of how much text each has. */
+    .menu-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 20px;
+    }
+    .menu-item {
+      display: grid;
+      grid-row: span 4;
+      grid-template-rows: subgrid;
+      gap: 10px;
+      border: 1px solid #e3e3e3;
+      border-radius: 12px;
+      padding: 16px;
+      background: #fff;
+    }
+    .menu-item .thumb {
+      height: 64px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #ffb37a, #ff7a59);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.8rem;
+    }
+    .menu-item .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .menu-item .name { font-weight: 600; }
+    .menu-item .price { color: #b5502e; font-weight: 600; white-space: nowrap; }
+    .menu-item .price::before { content: "$"; }
+    .menu-item .desc { color: #666; font-size: .88rem; line-height: 1.4; margin: 0; }
+    .menu-item .actions { display: flex; gap: 8px; align-self: end; }
+    .menu-item .actions button { flex: 1; padding: 6px 0; cursor: pointer; font-size: .85rem; }
+    .menu-item .actions .danger { color: #b3261e; border-color: #b3261e; }
+
+    /* Overlay: fixed full-viewport backdrop, blocks interaction with the grid below
+       while a dialog is open. Shown/hidden purely via the "if" binding on showDialog. */
+    .overlay {
+      position: fixed; inset: 0;
+      background: rgba(20, 20, 20, 0.5);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    .dialog-box {
+      background: #fff; width: 360px; max-width: 90vw;
+      border-radius: 12px; padding: 24px;
+      box-shadow: 0 12px 40px rgba(0,0,0,.3);
+    }
+    .dialog-box h2 { margin-top: 0; font-size: 1.2rem; }
+    .dialog-box label { display: block; margin-top: 12px; font-size: .85rem; color: #444; }
+    .dialog-box input { width: 100%; padding: 7px; font-size: .95rem; margin-top: 4px; box-sizing: border-box; }
+    .dialog-box .error { color: #b3261e; font-size: .85rem; margin-top: 10px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+    .dialog-actions button { padding: 7px 16px; cursor: pointer; }
+
+    nav a { display: inline-block; margin-top: 40px; }
+  </style>
+</head>
+<body>
+
+  <h1>Menu admin</h1>
+  <p>Shows: subgrid card layout, <code>foreach</code> over dish items, add/edit/delete via a blocking overlay dialog, and a draft object edited with nested <code>value</code> bindings.</p>
+
+  <div data-context="menuAdmin">
+
+    <div class="toolbar">
+      <span data-bind="text: itemCount"></span>
+      <button data-bind="event.click: openAdd">+ Add dish</button>
+    </div>
+
+    <div class="menu-grid" data-bind="foreach: items">
+      <template>
+        <article class="menu-item">
+          <div class="thumb">🍕</div>
+          <div class="head">
+            <span class="name" data-bind="text: name"></span>
+            <span class="price" data-bind="text: price"></span>
+          </div>
+          <p class="desc" data-bind="text: description"></p>
+          <div class="actions">
+            <button data-bind="event.click: global.openEdit">Edit</button>
+            <button class="danger" data-bind="event.click: global.remove">Delete</button>
+          </div>
+        </article>
+      </template>
+    </div>
+
+    <!-- Overlay: "if" toggles display:none, so it's fully removed from interaction/layout
+         when closed. Clicking the backdrop cancels; clicking inside the box stops that
+         click from bubbling up to the backdrop's handler. -->
+    <div class="overlay" data-bind="if: showDialog; event.click: cancel">
+      <div class="dialog-box" data-bind="event.click: stopPropagation">
+        <h2 data-bind="text: dialogTitle"></h2>
+
+        <label>
+          Name
+          <input data-bind="value: editingItem.name" />
+        </label>
+        <label>
+          Price
+          <input type="number" step="0.01" data-bind="value: editingItem.price" />
+        </label>
+        <label>
+          Description
+          <input data-bind="value: editingItem.description" />
+        </label>
+
+        <div class="error" data-bind="text: saveError; visible: saveError"></div>
+
+        <div class="dialog-actions">
+          <button data-bind="event.click: cancel">Cancel</button>
+          <button data-bind="event.click: save">Save</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <nav><a href="index.html">&larr; back to demos</a></nav>
+
+  <!-- <script src="../dist/src/index.global.js"></script> -->
+  <script src="js/dishes.global.js"></script>
+</body>
+</html>

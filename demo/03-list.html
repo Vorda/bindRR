@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BindRR Demo — Foreach List</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; }
+    .add-row { display: flex; gap: 8px; }
+    .add-row input { flex: 1; padding: 8px; font-size: 1rem; }
+    .add-row button { padding: 8px 16px; cursor: pointer; }
+    ul { list-style: none; padding: 0; margin-top: 20px; }
+    li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #eee; }
+    li span { flex: 1; }
+    li.done span { text-decoration: line-through; color: #999; }
+    li button { cursor: pointer; }
+    .empty { color: #999; margin-top: 20px; }
+    nav a { display: inline-block; margin-top: 30px; }
+  </style>
+</head>
+<body>
+
+  <h1>Todo list</h1>
+  <p>Shows: <code>foreach</code> binding with a <code>&lt;template&gt;</code>, per-item <code>$index</code>, and reaching back to the outer view model via <code>global</code>.</p>
+
+  <div data-context="todos">
+    <div class="add-row">
+      <input data-bind="value: draft" placeholder="New task..." />
+      <button data-bind="event.click: add">Add</button>
+    </div>
+
+    <div class="empty" data-bind="if: isEmpty">
+      No tasks yet.
+    </div>
+
+    <ul data-bind="foreach: items">
+      <template>
+        <li data-bind="class.done: done">
+          <input type="checkbox" data-bind="event.click: global.toggle" />
+          <span data-bind="text: label"></span>
+          <button data-bind="event.click: global.remove">x</button>
+        </li>
+      </template>
+    </ul>
+  </div>
+
+  <nav><a href="index.html">&larr; back to demos</a></nav>
+
+  <script src="../dist/bindRR.global.js"></script>
+  <script>
+    function TodosViewModel() {
+      this.draft = "";
+      this.items = [
+        { label: "Read the BindRR README", done: true },
+        { label: "Wire up a real project", done: false },
+      ];
+
+      this.isEmpty = BindRR.computed(function () {
+        return this.items.length === 0;
+      });
+
+      this.add = function () {
+        const text = this.draft.trim();
+        if (!text) return;
+        this.items.push({ label: text, done: false });
+        this.draft = "";
+      };
+
+      // Note on 'this' here: these are bound via "event.click: global.remove" from inside
+      // a foreach item, so BindRR calls them with the *item's* context as `this`
+      // (it has .label, .done, .$index, and .global — not the top-level view model directly).
+      // Reach the outer view model through this.global, and use this.$index for the item's position.
+      this.remove = function () {
+        this.global.items.splice(this.$index, 1);
+      };
+
+      this.toggle = function () {
+        this.global.items[this.$index].done = !this.global.items[this.$index].done;
+      };
+    }
+
+    const binder = new BindRR.DataBinderRR(new BindRR.ProxyManager());
+    binder.RegisterViewModel("todos", TodosViewModel);
+    binder.Bind();
+  </script>
+</body>
+</html>

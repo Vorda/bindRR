@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BindRR Demo — Form &amp; Validation</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; }
+    label { display: block; margin-top: 14px; font-size: .9rem; color: #333; }
+    input { width: 100%; padding: 8px; font-size: 1rem; box-sizing: border-box; margin-top: 4px; }
+    input.is-invalid { border-color: #d33; outline-color: #d33; }
+    .error { color: #d33; font-size: .85rem; margin-top: 4px; }
+    .preview { margin-top: 24px; padding: 12px; background: #f4f4f4; border-radius: 6px; }
+    button { margin-top: 20px; padding: 8px 20px; font-size: 1rem; cursor: pointer; }
+    nav a { display: inline-block; margin-top: 30px; }
+  </style>
+</head>
+<body>
+
+  <h1>Form</h1>
+  <p>Shows: two-way <code>value</code> binding, a <code>computed</code> full-name preview, and <code>validate</code> / <code>validateTrigger</code>.</p>
+
+  <div data-context="signup">
+    <label>
+      First name
+      <input data-bind="value: firstName" />
+    </label>
+    <label>
+      Last name
+      <input data-bind="value: lastName" />
+    </label>
+    <label>
+      Email
+      <input data-bind="value: email; validate: emailValid; validateTrigger: submitted" />
+      <div class="error" data-bind="text: emailError; visible: emailError"></div>
+    </label>
+
+    <div class="preview">
+      Preview: <strong data-bind="text: fullName"></strong>
+      (<span data-bind="text: email"></span>)
+    </div>
+
+    <button data-bind="event.click: submit">Sign up</button>
+    <div class="error" data-bind="text: submitMessage; if: submitMessage"></div>
+  </div>
+
+  <nav><a href="index.html">&larr; back to demos</a></nav>
+
+  <script src="../dist/bindRR.global.js"></script>
+  <script>
+    function SignupViewModel() {
+      this.firstName = "";
+      this.lastName = "";
+      this.email = "";
+      this.submitted = false;
+      this.submitMessage = "";
+
+      this.fullName = BindRR.computed(function () {
+        const name = (this.firstName + " " + this.lastName).trim();
+        return name || "(your name here)";
+      }, { cache: true });
+
+      // "validate" bindings expect the bound value itself to represent validity,
+      // so we expose emailValid as a computed boolean and keep the message separate.
+      // { cache: true } matters here, not just for performance: only the cached path in
+      // ObservableRR.evaluateComputed() calls notify() when a dependency changes, which is
+      // what tells the DOM binding to re-read this value. An uncached computed() only
+      // recalculates on read — it won't trigger a re-render on its own.
+      this.emailValid = BindRR.computed(function () {
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.email);
+      }, { cache: true });
+
+      this.emailError = BindRR.computed(function () {
+        return this.submitted && !this.emailValid ? "Enter a valid email address" : "";
+      }, { cache: true });
+
+      this.submit = function () {
+        this.submitted = true;
+        this.submitMessage = this.emailValid ? "Signed up! (not really — this is a demo)" : "Please fix the errors above";
+      };
+    }
+
+    const binder = new BindRR.DataBinderRR(new BindRR.ProxyManager());
+    binder.RegisterViewModel("signup", SignupViewModel);
+    binder.Bind();
+  </script>
+</body>
+</html>

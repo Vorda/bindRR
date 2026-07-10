@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BindRR Demo — Counter &amp; Computed</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 60px auto; text-align: center; }
+    button { font-size: 1.1rem; padding: 6px 16px; margin: 0 6px; cursor: pointer; }
+    .count { font-size: 3rem; margin: 20px 0 4px; }
+    .doubled { color: #666; }
+    nav a { display: inline-block; margin-top: 40px; }
+  </style>
+</head>
+<body>
+
+  <h1>Counter</h1>
+  <p>Shows: <code>text</code> binding, <code>event.click</code> binding, and a cached <code>computed()</code> property.</p>
+
+  <div data-context="counter">
+    <div class="count" data-bind="text: count"></div>
+    <div class="doubled">doubled: <span data-bind="text: doubled"></span></div>
+
+    <div style="margin-top: 20px;">
+      <button data-bind="event.click: decrement">-1</button>
+      <button data-bind="event.click: increment">+1</button>
+      <button data-bind="event.click: reset">reset</button>
+    </div>
+  </div>
+
+  <nav><a href="index.html">&larr; back to demos</a></nav>
+
+  <script src="../dist/bindRR.global.js"></script>
+  <!-- <script src="js/demo1.global.js"></script> -->
+  <script>
+    function CounterViewModel() {
+      this.count = 0;
+
+      this.doubled = BindRR.computed(function () {
+        return this.count * 2;
+      }, { cache: true });
+
+      this.increment = function () { this.count++; };
+      this.decrement = function () { this.count--; };
+      this.reset = function () { this.count = 0; };
+    }
+
+    const binder = new BindRR.DataBinderRR(new BindRR.ProxyManager());
+    binder.RegisterViewModel("counter", CounterViewModel);
+    binder.Bind();
+  </script>
+</body>
+</html>
