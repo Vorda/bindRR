@@ -36,10 +36,12 @@ export class SimpleBindingRR extends BindingRR {
                 break;
             }
             case "class":
+                // if we have target defined we add that class otherwise we just use value
+                // allows us to use either class.TargetClass or just class: TargetClass
                 if (value)
-                    this.element.classList.add(this.config.target || "");
+                    this.element.classList.add(this.config.target || value);
                 else
-                    this.element.classList.remove(this.config.target || "");
+                    this.element.classList.remove(this.config.target || value);
                 break;
             case "validate": {
                 // If a triggering property was declared, use it; otherwise, always validate.

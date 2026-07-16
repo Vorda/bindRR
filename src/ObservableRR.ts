@@ -245,49 +245,91 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
         const fnObj = fn as any;
         const options = fnObj[COMPUTED_CONFIG];
 
+        console.log("Evaluating computed for ", computedPath.join("."))
+
+        // options.cache should REALLY cache now with this short-circut :)
+        // Also swapped to a bool flag instead of fnObj.__cachedValue !== undefined
+        // If a cached computed's legitimate value is undefined, this check is always false, 
+        // so it "caches" undefined but then treats that as "not cached yet" forever — recomputing on every access 
+        if (options.cache && fnObj.__computedSubscriptions)
+            return fnObj.__cachedValue;
+
+        // If a computed function throws, computedContextStack permanently leaks a frame. 
+        // initComputedProperties() catches the error at the call site, but by then the stack is already corrupted
+        // every computed evaluated afterward in the app will read/write the wrong context, silently mis-attributing dependencies
         pushComputedContext(); // Begin dependency tracking.
-        const result = fn.call(receiver); // Evaluate the computed function.
-        const computedContext = popComputedContext(); // Get the recorded dependencies.
-        
+        let result: any;
+        let computedContext: ComputedContext;
+        try { 
+            result = fn.call(receiver); // Evaluate the computed function.  
+        }
+        catch (e) { console.error(`Error while calling ${computedPath.join(".")} -> ${e}`); }
+        finally {
+            computedContext = popComputedContext(); // Get the recorded dependencies.
+        }
+
         // If caching is enabled, set up subscriptions to invalidate cache when any dependency changes.
         if (options.cache) {
-            if (!fnObj.__computedSubscriptions) {
-                fnObj.__computedSubscriptions = [];
-                computedContext.dependencies.forEach((dep: string) => {
-                    // Subscribe to dependency changes.
-                    const subscription = this.subscribe(
-                        () => {
-                            // Invalidate cached value when any dependency changes.
-                            const oldValue = fnObj.__cachedValue;
-                            fnObj.__cachedValue = fn.call(receiver);
-                            this.notify(computedPath, fnObj.__cachedValue, oldValue);
-                        },
-                        (changedPath) => {
-                            const depParts = dep.split(".");
-                            if (changedPath.length > 1)
-                            {
-                                console.warn(`CARE, changed path is: ${changedPath}!!! Taking special route :)`);
-                                return isPrefix([changedPath[0]], depParts);
-                            }
-                            // A simple test for now: if the changed path is a prefix of the dependency path.
-                            return isPrefix(changedPath, depParts);
-                        }, 
-                        undefined,
-                        ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: "Computed", reason: "Computed dep. update!" } : undefined
-                    );
-                    fnObj.__computedSubscriptions.push(subscription);
-                });
-            }
-
-            if (fnObj.__cachedValue !== undefined) {
-                return fnObj.__cachedValue;
-            } else {
-                fnObj.__cachedValue = result;
-                return result;
-            }
+            this.subscribeComputedDependencies(fn, receiver, computedPath, computedContext.dependencies);
+            fnObj.__cachedValue = result;
+            fnObj.__hasCachedValue = true;
         }
 
         return result;
+    }
+
+    // Pulled out so it can be called again on every recompute, not just the first one.
+    private subscribeComputedDependencies(
+        fn: Function,
+        receiver: any,
+        computedPath: PropertyKey[],
+        dependencies: Set<string>
+    ): void {
+        const fnObj = fn as any;
+
+        // Tear down last generation's subscriptions - the dependency set may
+        // differ this time around (e.g. a branch in the computed took a
+        // different path and read different properties).
+        if (fnObj.__computedSubscriptions) {
+            fnObj.__computedSubscriptions.forEach((sub: { unsubscribe: () => void }) => sub.unsubscribe());
+        }
+        fnObj.__computedSubscriptions = [];
+
+        dependencies.forEach((dep: string) => {
+            const subscription = this.subscribe(
+                () => {
+                    const oldValue = fnObj.__cachedValue;
+
+                    pushComputedContext(); 
+                    let newContext: ComputedContext;
+                    let newValue: any;
+                    try {
+                        newValue = fn.call(receiver); 
+                    }
+                    catch (e) { console.error(`Error while calling ${computedPath.join(".")} -> ${e}`); }
+                    finally {
+                        newContext = popComputedContext(); 
+                    }
+
+                    // Re-subscribe using this run's freshly tracked dependencies.
+                    this.subscribeComputedDependencies(fn, receiver, computedPath, newContext.dependencies);
+
+                    // Invalidate cached value when any dependency changes.
+                    fnObj.__cachedValue = newValue;
+                    this.notify(computedPath, newValue, oldValue);
+                },
+                (changedPath) => {
+                    const depParts = dep.split(".");
+                    if (changedPath.length > 1) {
+                        return isPrefix([changedPath[0]], depParts);
+                    }
+                    return isPrefix(changedPath, depParts);
+                },
+                undefined,
+                ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: "Computed", reason: "Computed dep. update!" } : undefined
+            );
+            fnObj.__computedSubscriptions.push(subscription);
+        });
     }
 
     // helper method that recursively traverses an object
@@ -306,6 +348,7 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                         });
                         delete value.__computedSubscriptions;
                         delete value.__cachedValue;
+                        delete value.__hasCachedValue;
                     }
                 } else if (value && typeof value === 'object') {
                     // Recursively clean computed subscriptions in nested objects.
@@ -397,12 +440,12 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                 const result = Reflect.set(obj, prop, valueToSet, receiver);
                 if (oldVal !== newVal) 
                 {
-                    if (fullPath.length > 1)
-                    {
-                        console.warn(`SET HANDLER, path is: ${fullPath}!!! Taking special route :)`);
-                        this.notify([fullPath[0]], newVal, oldVal);
-                    }
-                    else
+                    // if (fullPath.length > 1)
+                    // {
+                    //     console.warn(`SET HANDLER, path is: ${fullPath}!!! Taking special route :)`);
+                    //     this.notify([fullPath[0]], newVal, oldVal);
+                    // }
+                    // else
                         this.notify(fullPath, newVal, oldVal);
                 }
                 return result;
@@ -415,14 +458,14 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                 const oldVal = Reflect.get(obj, prop);
                 const result = Reflect.deleteProperty(obj, prop);
                 if (result) {
-                    if (fullPath.length > 1)
-                    {
-                        console.warn(`DELETE HANDLER, path is: ${fullPath}!!! Taking special route :)`);
-                        this.notify([fullPath[0]], undefined, oldVal);
-                    } else {
+                    // if (fullPath.length > 1)
+                    // {
+                    //     console.warn(`DELETE HANDLER, path is: ${fullPath}!!! Taking special route :)`);
+                    //     this.notify([fullPath[0]], undefined, oldVal);
+                    // } 
+                    // else 
                         // Indicate deletion by representing the new value as undefined for now.
                         this.notify(fullPath, undefined, oldVal);
-                    }
                 }
                 return result;
             }

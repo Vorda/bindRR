@@ -8,6 +8,13 @@
     .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
     .toolbar button { padding: 8px 18px; font-size: .95rem; cursor: pointer; }
 
+    .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+    .filters button {
+      padding: 5px 14px; font-size: .85rem; cursor: pointer;
+      border: 1px solid #ccc; border-radius: 999px; background: #fff; color: #444;
+    }
+    .filters button.active { background: #ff7a59; border-color: #ff7a59; color: #fff; }
+
     /* Outer grid: responsive card columns. Each card spans the same number of row
        tracks and uses grid-template-rows: subgrid, so the thumbnail/name/description/
        actions rows line up across every card regardless of how much text each has. */
@@ -18,7 +25,7 @@
     }
     .menu-item {
       display: grid;
-      grid-row: span 4;
+      grid-row: span 5;
       grid-template-rows: subgrid;
       gap: 10px;
       border: 1px solid #e3e3e3;
@@ -38,6 +45,7 @@
     .menu-item .price { color: #b5502e; font-weight: 600; white-space: nowrap; }
     .menu-item .price::before { content: "$"; }
     .menu-item .desc { color: #666; font-size: .88rem; line-height: 1.4; margin: 0; }
+    .menu-item .category-tag { justify-self: start; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: #b5502e; background: #fff1ea; padding: 2px 8px; border-radius: 999px; }
     .menu-item .actions { display: flex; gap: 8px; align-self: end; }
     .menu-item .actions button { flex: 1; padding: 6px 0; cursor: pointer; font-size: .85rem; }
     .menu-item .actions .danger { color: #b3261e; border-color: #b3261e; }
@@ -71,13 +79,22 @@
   <p>Shows: subgrid card layout, <code>foreach</code> over dish items, add/edit/delete via a blocking overlay dialog, and a draft object edited with nested <code>value</code> bindings.</p>
 
   <div data-context="menuAdmin">
-
     <div class="toolbar">
       <span data-bind="text: itemCount"></span>
       <button data-bind="event.click: openAdd">+ Add dish</button>
     </div>
 
-    <div class="menu-grid" data-bind="foreach: items">
+    <div class="filters">
+      <span data-bind="foreach: categories">
+        <template>
+          <button data-bind="text: name; event.click: global.setCategory; class.active: active"></button>
+        </template>
+      </span>
+    </div>
+
+    <div class="empty-state" data-bind="if: isFilteredEmpty">No dishes in this category yet.</div>
+
+    <div class="menu-grid" data-bind="foreach: filteredItems">
       <template>
         <article class="menu-item">
           <div class="thumb">🍕</div>
@@ -85,6 +102,7 @@
             <span class="name" data-bind="text: name"></span>
             <span class="price" data-bind="text: price"></span>
           </div>
+          <span class="category-tag" data-bind="text: category"></span>
           <p class="desc" data-bind="text: description"></p>
           <div class="actions">
             <button data-bind="event.click: global.openEdit">Edit</button>
@@ -113,8 +131,12 @@
           Description
           <input data-bind="value: editingItem.description" />
         </label>
+         <label>
+          Category
+          <input data-bind="value: editingItem.category" />
+        </label>
 
-        <div class="error" data-bind="text: saveError; visible: saveError"></div>
+        <div class="error" data-bind="if: saveError; text: saveError"></div>
 
         <div class="dialog-actions">
           <button data-bind="event.click: cancel">Cancel</button>
