@@ -1,15 +1,15 @@
 ﻿import { AsyncEventEmitterRR } from "./EventEmitterRR";
 
 // Define a unique symbol for computed properties.
-const COMPUTED_FLAG = Symbol("computed");
+export const COMPUTED_FLAG = Symbol("computed");
 
 // Define a unique symbol to mark computed configuration objects.
-const COMPUTED_CONFIG = Symbol("computed_config")
+const COMPUTED_CONFIG = Symbol("computed_config");
 
 // Starting point for easily extending computed properties.
 // For now we implement just a simple cache system
 interface ComputedOptions {
-    cache?: boolean
+    cache?: boolean;
 }
 
 // A computed context has a set of dependency paths (stored as a dot-joined string).
@@ -123,6 +123,8 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
         this.ignoreList = ignoreList || new ProxyManager();
         this.original = target;
         this.proxy = this.createProxy(target);
+
+        this.initComputedProperties();
     }
 
     public async BeforeTargetChange(callback: () => void): Promise<void> {
@@ -131,6 +133,23 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
 
     public async AfterTargetChange(callback: () => void): Promise<void> {
         this.on("afterResetTarget", callback);
+    }
+
+    private initComputedProperties(): void {
+        const original = this.Original as any;
+        const proxy = this.Proxy as any;
+
+        for (const key of Object.keys(original)) {
+            const val = original[key];
+
+            if (typeof val === "function" && val[COMPUTED_FLAG]) {
+                try {
+                    proxy[key]; // triggers evaluateComputed internally
+                } catch (e) {
+                    console.error("Error initializing computed:", key, e);
+                }
+            }
+        }
     }
 
     /**
@@ -229,9 +248,7 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
         pushComputedContext(); // Begin dependency tracking.
         const result = fn.call(receiver); // Evaluate the computed function.
         const computedContext = popComputedContext(); // Get the recorded dependencies.
-
-        //console.log("Computed dependencies:", Array.from(computedContext.dependencies));
-
+        
         // If caching is enabled, set up subscriptions to invalidate cache when any dependency changes.
         if (options.cache) {
             if (!fnObj.__computedSubscriptions) {
@@ -241,14 +258,21 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                     const subscription = this.subscribe(
                         () => {
                             // Invalidate cached value when any dependency changes.
-                            delete fnObj.__cachedValue;
-                            this.notify(computedPath, fn.call(receiver), undefined);
+                            const oldValue = fnObj.__cachedValue;
+                            fnObj.__cachedValue = fn.call(receiver);
+                            this.notify(computedPath, fnObj.__cachedValue, oldValue);
                         },
                         (changedPath) => {
                             const depParts = dep.split(".");
+                            if (changedPath.length > 1)
+                            {
+                                console.warn(`CARE, changed path is: ${changedPath}!!! Taking special route :)`);
+                                return isPrefix([changedPath[0]], depParts);
+                            }
                             // A simple test for now: if the changed path is a prefix of the dependency path.
                             return isPrefix(changedPath, depParts);
-                        }, undefined,
+                        }, 
+                        undefined,
                         ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: "Computed", reason: "Computed dep. update!" } : undefined
                     );
                     fnObj.__computedSubscriptions.push(subscription);
@@ -330,7 +354,11 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                 // If a computed function is being evaluated, record this property access.
                 if (computedContextStack.length > 0) {
                     const currentContext = computedContextStack[computedContextStack.length - 1];
-                    currentContext.dependencies.add(fullPath.join("."));
+                     if (typeof prop === "symbol") {
+                        // Skip dependency tracking for symbols
+                    } else {
+                        currentContext.dependencies.add(fullPath.join("."));
+                    }
                 }
 
                 let value = Reflect.get(obj, prop, receiver);
@@ -346,10 +374,8 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                         // Otherwise just call the function normally.
                         value = value.call(receiver);
                     }
-                }
-
-                // Automatically wrap nested objects or arrays in a proxy.
-                if (value && typeof value === 'object' && !value.__isProxy) {
+                } else if (value && typeof value === 'object' && !value.__isProxy) {
+                    // Automatically wrap nested objects or arrays in a proxy.
                     const proxiedValue = this.createProxy(value, [...currentPath, prop]);
                     // Cache the proxied value on the object.
                     Reflect.set(obj, prop, proxiedValue, receiver);
@@ -370,7 +396,15 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                     valueToSet = this.createProxy(newVal, fullPath);
                 const result = Reflect.set(obj, prop, valueToSet, receiver);
                 if (oldVal !== newVal) 
-                    this.notify(fullPath, newVal, oldVal);
+                {
+                    if (fullPath.length > 1)
+                    {
+                        console.warn(`SET HANDLER, path is: ${fullPath}!!! Taking special route :)`);
+                        this.notify([fullPath[0]], newVal, oldVal);
+                    }
+                    else
+                        this.notify(fullPath, newVal, oldVal);
+                }
                 return result;
             },
             deleteProperty: (obj, prop) => {
@@ -381,8 +415,14 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                 const oldVal = Reflect.get(obj, prop);
                 const result = Reflect.deleteProperty(obj, prop);
                 if (result) {
-                    // Indicate deletion by representing the new value as undefined for now.
-                    this.notify(fullPath, undefined, oldVal);
+                    if (fullPath.length > 1)
+                    {
+                        console.warn(`DELETE HANDLER, path is: ${fullPath}!!! Taking special route :)`);
+                        this.notify([fullPath[0]], undefined, oldVal);
+                    } else {
+                        // Indicate deletion by representing the new value as undefined for now.
+                        this.notify(fullPath, undefined, oldVal);
+                    }
                 }
                 return result;
             }
