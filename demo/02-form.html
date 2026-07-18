@@ -54,24 +54,18 @@
       this.submitted = false;
       this.submitMessage = "";
 
-      this.fullName = BindRR.computed(function () {
+      this.fullName = BindRR.computed(function fullName() {
         const name = (this.firstName + " " + this.lastName).trim();
         return name || "(your name here)";
-      }, { cache: true });
+      }, { cache: true, deps: ["firstName", "lastName"] });
 
-      // "validate" bindings expect the bound value itself to represent validity,
-      // so we expose emailValid as a computed boolean and keep the message separate.
-      // { cache: true } matters here, not just for performance: only the cached path in
-      // ObservableRR.evaluateComputed() calls notify() when a dependency changes, which is
-      // what tells the DOM binding to re-read this value. An uncached computed() only
-      // recalculates on read — it won't trigger a re-render on its own.
-      this.emailValid = BindRR.computed(function () {
+      this.emailValid = BindRR.computed(function emailValid() {
         return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.email);
-      }, { cache: true });
+      }, { cache: true, deps: ["email"] });
 
-      this.emailError = BindRR.computed(function () {
+      this.emailError = BindRR.computed(function emailError() {
         return this.submitted && !this.emailValid ? "Enter a valid email address" : "";
-      }, { cache: true });
+      }, { cache: true, deps: ["submitted", "emailValid"] });
 
       this.submit = function () {
         this.submitted = true;

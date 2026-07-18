@@ -22,7 +22,7 @@ class CounterViewModel {
   count: number = 0;
 
   // computed property with correct typing
-  doubled = computed(() => this.count * 2, { cache: true });
+  doubled = computed(function doubled() { this.count * 2, { cache: true, deps: ["count"] } });
 
   increment() {
     this.count++;

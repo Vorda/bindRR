@@ -3,36 +3,19 @@
 export class ComputedRR<T = any> {
     constructor(
         public readonly fn: (this: any) => T,
-        public readonly cache: boolean = false
+        public readonly cache: boolean = false,
+        public readonly deps: PropertyKey[] = []
     ) {}
 }
 
-export function computed<T>(fn: (this: any) => T, options?: { cache?: boolean }): ComputedRR<T> {
-    return new ComputedRR(fn, options?.cache ?? false);
+export function computed<T>(fn: (this: any) => T, options?: { cache?: boolean; deps?: PropertyKey[] }): ComputedRR<T> {
+    return new ComputedRR(fn, options?.cache ?? false, options?.deps ?? []);
 }
 
 interface ComputedStateRR {
     value: any;
     dirty: boolean;
     subs: { unsubscribe: () => void }[];
-}
-
-// A computed context has a set of dependency paths (stored as a dot-joined string).
-// Used in our prototype of advanced dependancy tracking for computed properties
-interface ComputedContext {
-    dependencies: Set<string>;
-}
-
-// The stack that holds the active computed contexts.
-const computedContextStack: ComputedContext[] = [];
-
-// Helper functions to push/pop contexts.
-function pushComputedContext(): void {
-    computedContextStack.push({ dependencies: new Set<string>() }); 
-}
-
-function popComputedContext(): ComputedContext {
-    return computedContextStack.pop()!;
 }
 
 export function isPrefix(prefix: PropertyKey[], full: PropertyKey[]): boolean {
@@ -105,6 +88,8 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
 
     private observerMap: Map<number, SubscriptionRR> = new Map();
     private nextObserverId: number = 0;
+
+    private computedStates = new Map<ComputedRR, ComputedStateRR>();
 
     // Set this flag to true during development to enable detailed logging.
     public static DEBUG_SUBSCRIPTIONS: boolean = false;
@@ -230,6 +215,7 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
         if (!state) {
             state = { value: undefined, dirty: true, subs: [] };
             this.computedStates.set(computed, state);
+            this.trackDependencies(computed, path, state);
         }
 
         if (computed.cache && !state.dirty)
@@ -237,10 +223,6 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
 
         console.log("Evaluating computed for ", path.join("."))
 
-        // If a computed function throws, computedContextStack permanently leaks a frame. 
-        // we really need to guard against stack getting corrupted - every computed evaluated afterward 
-        // in the app will read/write the wrong context, silently mis-attributing dependencies
-        pushComputedContext(); // Begin dependency tracking.
         let result: any;
         try { 
             result = computed.fn.call(receiver); // Evaluate the computed function.  
@@ -248,23 +230,14 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
         catch (e) {
             console.error(`Error while calling ${path.join(".")} -> ${e}`);
         }
-        finally {
-            const computedContext = popComputedContext(); // Get the recorded dependencies.
-            if (computed.cache)
-                this.trackDependencies(computed, receiver, path, computedContext.dependencies, state);
-        }
 
         state.value = result;
         state.dirty = false;
         return result;
     }
 
-    private trackDependencies(computed: ComputedRR, receiver: any, path: PropertyKey[], dependencies: Set<string>, state: ComputedStateRR): void {
-        state.subs.forEach(x => x.unsubscribe());
-        state.subs = dependencies.size ? [] : state.subs;
-        
-        dependencies.forEach((dep: string) => {
-            const depParts = dep.split(".");
+    private trackDependencies(computed: ComputedRR, path: PropertyKey[], state: ComputedStateRR): void {
+        computed.deps.forEach((key) => {
             state.subs.push(this.subscribe(
                 () => {
                     if (state.dirty) return; // already pending — avoid duplicate notifies
@@ -272,10 +245,12 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                     state.dirty = true;
                     this.notify(path, undefined, oldValue, true);
                 },
-                // TODO: revisit subscriptions and paths, still not sure if was an ok fix - taking only first part of the path
-                (changedPath) => changedPath.length > 1 ? isPrefix([changedPath[0]], depParts) : isPrefix(changedPath, depParts), 
+                // broad: root key only, no isPrefix needed.
+                // TODO: revisit if we need nested path precision (user.address.city and user.role for ex. now both just invalidate
+                // anything depending on user - we over-invalidate - harmless, just an extra recompute)
+                (changedPath) => changedPath[0] === key, 
                 undefined,
-                ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: `Computed => ${computed.fn.name} `, reason: "Computed dep. update!" } : undefined
+                ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: `Computed => ${computed.fn.name} `, reason: `Computed dep. update (${String(key)})!` } : undefined
             ));
         });
     }
@@ -314,21 +289,8 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                     return Reflect.get(obj, prop, receiver);
 
                 const fullPath = [...currentPath, prop];
-
-                // --- Dependency tracking --- 
-                // If a computed function is being evaluated, record this property access.
-                if (computedContextStack.length > 0) {
-                    const currentContext = computedContextStack[computedContextStack.length - 1];
-                     if (typeof prop === "symbol") {
-                        // Skip dependency tracking for symbols
-                    } else {
-                        currentContext.dependencies.add(fullPath.join("."));
-                    }
-                }
-
                 let value = Reflect.get(obj, prop, receiver);
 
-                // --- Computed handling ---
                 if (value instanceof ComputedRR) {
                     value = this.evaluateComputed(value, receiver, fullPath);
                 } else if (value && typeof value === 'object' && !value.__isProxy) {
@@ -353,15 +315,7 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                     valueToSet = this.createProxy(newVal, fullPath);
                 const result = Reflect.set(obj, prop, valueToSet, receiver);
                 if (oldVal !== newVal) 
-                {
-                    // if (fullPath.length > 1)
-                    // {
-                    //     console.warn(`SET HANDLER, path is: ${fullPath}!!! Taking special route :)`);
-                    //     this.notify([fullPath[0]], newVal, oldVal);
-                    // }
-                    // else
-                        this.notify(fullPath, newVal, oldVal);
-                }
+                    this.notify(fullPath, newVal, oldVal);
                 return result;
             },
             deleteProperty: (obj, prop) => {
@@ -371,16 +325,8 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                 const fullPath = [...currentPath, prop];
                 const oldVal = Reflect.get(obj, prop);
                 const result = Reflect.deleteProperty(obj, prop);
-                if (result) {
-                    // if (fullPath.length > 1)
-                    // {
-                    //     console.warn(`DELETE HANDLER, path is: ${fullPath}!!! Taking special route :)`);
-                    //     this.notify([fullPath[0]], undefined, oldVal);
-                    // } 
-                    // else 
-                        // Indicate deletion by representing the new value as undefined for now.
-                        this.notify(fullPath, undefined, oldVal);
-                }
+                if (result)
+                    this.notify(fullPath, undefined, oldVal);
                 return result;
             }
         };

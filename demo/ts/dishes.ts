@@ -33,17 +33,18 @@ class MenuAdminViewModel {
 
     public activeCategory: string = "All";
 
-    public dialogTitle = computed(function dialogTitle() { return this.dialogMode == "edit" ? "Edit dish" : "Add dish"; }, { cache: true });
+    public dialogTitle = computed(function dialogTitle() {
+        return this.dialogMode == "edit" ? "Edit dish" : "Add dish"; 
+    }, { cache: true, deps: ["dialogMode"] });
 
     public itemCount = computed(function itemCount() {
         const n = this.items.length;
         return n + (n === 1 ? " dish" : " dishes");
-    }, { cache: true });
+    }, { cache: true, deps: ["items"] });
 
     public categories = computed(function categories() {
         const retVal: any[] = [];
         const seen = new Set<string>();
-        this.activeCategory; // quick hack (for the css button bind) - this call will add a dependency - so categories will be re-rendered when activeCategory changes 
 
         retVal.push({ name: "All",
              get active() { 
@@ -63,14 +64,14 @@ class MenuAdminViewModel {
         }
 
         return retVal;
-    }, { cache: true });
+    }, { cache: true, deps: ["items", "activeCategory"] });
 
-    public filteredItems = computed(function filteredItems() {
+    public filteredItems = computed(function filteredItems(this: MenuAdminViewModel) {
         if (this.activeCategory === "All")
             return [...this.items];   // copy -> new reference every recompute - see limitations in ObservableRR.md
         
         return this.items.filter(i => i.category === this.activeCategory);
-    }, { cache: true });
+    }, { cache: true, deps: ["items", "activeCategory"] });
 
     constructor(public items: DishMenuItem[] = []) { }
 

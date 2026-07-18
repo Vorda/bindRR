@@ -35,9 +35,9 @@
     function CounterViewModel() {
       this.count = 0;
 
-      this.doubled = BindRR.computed(function () {
+      this.doubled = BindRR.computed(function doubled () {
         return this.count * 2;
-      }, { cache: true });
+      }, { cache: true, deps: ["count"] });
 
       this.increment = function () { this.count++; };
       this.decrement = function () { this.count--; };

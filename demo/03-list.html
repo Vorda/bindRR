@@ -54,9 +54,9 @@
         { label: "Wire up a real project", done: false },
       ];
 
-      this.isEmpty = BindRR.computed(function () {
+      this.isEmpty = BindRR.computed(function isEmpty() {
         return this.items.length === 0;
-      });
+      }, { cache: true, deps: ["items"] });
 
       this.add = function () {
         const text = this.draft.trim();
