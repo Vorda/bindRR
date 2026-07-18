@@ -33,14 +33,14 @@ class MenuAdminViewModel {
 
     public activeCategory: string = "All";
 
-    public dialogTitle = computed(function() { return this.dialogMode == "edit" ? "Edit dish" : "Add dish"; }, { cache: true });
+    public dialogTitle = computed(function dialogTitle() { return this.dialogMode == "edit" ? "Edit dish" : "Add dish"; }, { cache: true });
 
-    public itemCount = computed(function() {
+    public itemCount = computed(function itemCount() {
         const n = this.items.length;
         return n + (n === 1 ? " dish" : " dishes");
     }, { cache: true });
 
-    public categories = computed(function() {
+    public categories = computed(function categories() {
         const retVal: any[] = [];
         const seen = new Set<string>();
         this.activeCategory; // quick hack (for the css button bind) - this call will add a dependency - so categories will be re-rendered when activeCategory changes 
@@ -65,9 +65,9 @@ class MenuAdminViewModel {
         return retVal;
     }, { cache: true });
 
-    public filteredItems = computed(function() {
+    public filteredItems = computed(function filteredItems() {
         if (this.activeCategory === "All")
-            return this.items;
+            return [...this.items];   // copy -> new reference every recompute - see limitations in ObservableRR.md
         
         return this.items.filter(i => i.category === this.activeCategory);
     }, { cache: true });

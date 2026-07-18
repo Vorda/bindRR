@@ -276,6 +276,31 @@ await obs.resetTarget({ count: 0 });
 - Proxying very large objects can be expensive  
 - Computed metadata stored on functions (can be improved with WeakMaps)  
 - Dependency tracking uses string paths (prefix matching only)  
+- Change detection on computed results is a strict `===` check — a computed that returns
+  the *same object/array reference* on recompute (e.g. `return this.items` unmodified,
+  as opposed to `this.items.filter(...)`, which always allocates a new array) will not
+  notify subscribers even if its contents changed, since `newValue === oldValue` holds
+  and `notify()` bails out early. Any branch of a computed that can hand back a stored
+  reference unchanged should copy it first (`[...this.items]` / `{ ...this.obj }`) to
+  guarantee a fresh reference on every recompute.
+  **Concrete example of the trap:**
+```ts
+  // BUG: "All" branch returns the live items reference. Pushing a new item
+  // mutates that array in place, so newValue === oldValue on recompute and
+  // notify() never fires — any UI bound to this computed goes stale.
+  filteredItems = computed(function () {
+      if (this.activeCategory === "All")
+          return this.items;
+      return this.items.filter(i => i.category === this.activeCategory);
+  }, { cache: true });
+ 
+  // FIX: always hand back a fresh array reference.
+  filteredItems = computed(function () {
+      if (this.activeCategory === "All")
+          return [...this.items];
+      return this.items.filter(i => i.category === this.activeCategory);
+  }, { cache: true });
+```
 
 ---
 

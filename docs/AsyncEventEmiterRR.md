@@ -268,6 +268,155 @@ await ui.emitParallel("render");
 
 ---
 
+## **5.5 E-commerce checkout pipeline**
+
+Here's a realistic scenario where using AsyncEventEmiterRR really pays off: an **e-commerce checkout pipeline**, where different phases genuinely need different failure semantics — some must fail fast, some must run independently and report every failure, and some must run strictly in order.
+
+```ts
+import { AsyncEventEmitterRR } from "./EventEmitterRR";
+
+// ─────────────────────────────────────────────────────────────
+// 1. Define the event map — one entry per event, value = argument tuple.
+//    This is the thing that makes every `on`/`emit*` call below type-checked.
+// ─────────────────────────────────────────────────────────────
+interface Order {
+    id: string;
+    items: { sku: string; qty: number }[];
+    total: number;
+    customerEmail: string;
+}
+
+interface CheckoutEvents {
+    // fired once per validator; ALL must pass before we proceed
+    validateOrder: [Order];
+
+    // fired once per reservation step; must run in strict order
+    // (can't charge the card before stock is reserved)
+    reserveStock: [Order];
+    chargePayment: [Order];
+    createOrderRecord: [Order];
+
+    // fired after the order is committed; independent side-effects
+    // that shouldn't block each other
+    orderCompleted: [Order];
+}
+
+// ─────────────────────────────────────────────────────────────
+// 2. Subclass the emitter and expose a narrow public API.
+//    Callers can't reach into `on`/`emit*` directly — they go through
+//    the methods CheckoutPipeline chooses to expose.
+// ─────────────────────────────────────────────────────────────
+class CheckoutPipeline extends AsyncEventEmitterRR<CheckoutEvents> {
+
+    // Public registration surface — thin wrappers around protected `on`
+    onValidate(fn: (order: Order) => Promise<void> | void) { this.on("validateOrder", fn); }
+    onReserveStock(fn: (order: Order) => Promise<void> | void) { this.on("reserveStock", fn); }
+    onChargePayment(fn: (order: Order) => Promise<void> | void) { this.on("chargePayment", fn); }
+    onCreateOrderRecord(fn: (order: Order) => Promise<void> | void) { this.on("createOrderRecord", fn); }
+    onOrderCompleted(fn: (order: Order) => Promise<void> | void) { this.on("orderCompleted", fn); }
+
+    async checkout(order: Order): Promise<void> {
+        // --- Phase 1: validation — use emit() (fail-fast) -----------------
+        // Multiple independent validators (stock check, fraud check, coupon
+        // check...) can all run concurrently, but if ANY of them throws
+        // (e.g. "card declined pre-check" or "item out of stock"), we want
+        // to abort checkout immediately rather than keep going. emit()'s
+        // Promise.all-style fail-fast behavior is exactly right here.
+        try {
+            await this.emit("validateOrder", order);
+        } catch (err) {
+            throw new Error(`Checkout aborted — validation failed: ${(err as Error).message}`);
+        }
+
+        // --- Phase 2: the actual transaction — use emitSequential() -------
+        // These three steps have a hard dependency order: you must reserve
+        // stock before charging the card, and charge the card before you
+        // persist the order as "paid". Running them with Promise.all would
+        // be a correctness bug (you could charge a card for stock you never
+        // actually reserved). emitSequential() awaits each stage fully
+        // before starting the next.
+        await this.emitSequential("reserveStock", order);
+        await this.emitSequential("chargePayment", order);
+        await this.emitSequential("createOrderRecord", order);
+
+        // --- Phase 3: post-commit side effects — use emitParallel() -------
+        // Sending a confirmation email, notifying the warehouse, pushing an
+        // analytics event, and updating a recommendation model are all
+        // independent. If the analytics call times out, that must NOT stop
+        // the customer's confirmation email from going out — but we still
+        // want to know about the failure. emitParallel() runs everything
+        // concurrently and aggregates any failures into one AggregateError
+        // rather than letting one bad listener hide the others' outcomes.
+        try {
+            await this.emitParallel("orderCompleted", order);
+        } catch (err) {
+            // Order is already committed — these are non-critical failures.
+            // Log/alert, but don't roll back the sale over a failed email.
+            console.error("Some post-checkout side effects failed:", err);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 3. Wire up listeners and run it.
+// ─────────────────────────────────────────────────────────────
+const pipeline = new CheckoutPipeline();
+
+pipeline.onValidate(async (order) => {
+    if (order.items.length === 0) throw new Error("Cart is empty");
+});
+pipeline.onValidate(async (order) => {
+    const inStock = await checkInventoryService(order.items);
+    if (!inStock) throw new Error("Item out of stock");
+});
+
+pipeline.onReserveStock(async (order) => {
+    console.log(`Reserving stock for order ${order.id}...`);
+    await reserveInventory(order.items);
+});
+
+pipeline.onChargePayment(async (order) => {
+    console.log(`Charging $${order.total} for order ${order.id}...`);
+    await chargeCard(order.total);
+});
+
+pipeline.onCreateOrderRecord(async (order) => {
+    console.log(`Persisting order ${order.id}...`);
+    await saveOrderToDatabase(order);
+});
+
+pipeline.onOrderCompleted(async (order) => {
+    await sendConfirmationEmail(order.customerEmail, order.id);
+});
+pipeline.onOrderCompleted(async (order) => {
+    await notifyWarehouse(order);
+});
+pipeline.onOrderCompleted(async (order) => {
+    await pushAnalyticsEvent("order_completed", order.id);
+});
+
+// ─────────────────────────────────────────────────────────────
+// Stub services (stand-ins for real I/O)
+// ─────────────────────────────────────────────────────────────
+async function checkInventoryService(_items: Order["items"]): Promise<boolean> { return true; }
+async function reserveInventory(_items: Order["items"]): Promise<void> {}
+async function chargeCard(_total: number): Promise<void> {}
+async function saveOrderToDatabase(_order: Order): Promise<void> {}
+async function sendConfirmationEmail(_email: string, _orderId: string): Promise<void> {}
+async function notifyWarehouse(_order: Order): Promise<void> {}
+async function pushAnalyticsEvent(_name: string, _orderId: string): Promise<void> {}
+
+// Run it:
+pipeline.checkout({
+    id: "ORD-1001",
+    items: [{ sku: "SKU-1", qty: 2 }],
+    total: 49.98,
+    customerEmail: "customer@example.com",
+}).then(() => console.log("Checkout complete."));
+```
+
+---
+
 # **6. When You Should Use AsyncEventEmitterRR**
 
 ### ✔️ When you need async listeners  

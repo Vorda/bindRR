@@ -1,15 +1,20 @@
 ﻿import { AsyncEventEmitterRR } from "./EventEmitterRR";
 
-// Define a unique symbol for computed properties.
-export const COMPUTED_FLAG = Symbol("computed");
+export class ComputedRR<T = any> {
+    constructor(
+        public readonly fn: (this: any) => T,
+        public readonly cache: boolean = false
+    ) {}
+}
 
-// Define a unique symbol to mark computed configuration objects.
-const COMPUTED_CONFIG = Symbol("computed_config");
+export function computed<T>(fn: (this: any) => T, options?: { cache?: boolean }): ComputedRR<T> {
+    return new ComputedRR(fn, options?.cache ?? false);
+}
 
-// Starting point for easily extending computed properties.
-// For now we implement just a simple cache system
-interface ComputedOptions {
-    cache?: boolean;
+interface ComputedStateRR {
+    value: any;
+    dirty: boolean;
+    subs: { unsubscribe: () => void }[];
 }
 
 // A computed context has a set of dependency paths (stored as a dot-joined string).
@@ -28,19 +33,6 @@ function pushComputedContext(): void {
 
 function popComputedContext(): ComputedContext {
     return computedContextStack.pop()!;
-}
-
-// The helper function for marking a function as computed. If an options object is provided
-// (currently supporting { cache: boolean }), attach it via COMPUTED_CONFIG.
-export function computed<T extends Function>(fn: T, options?: ComputedOptions): T {
-    // Always mark the function as computed.
-    (fn as any)[COMPUTED_FLAG] = true;
-
-    // If any options were provided then attach them.
-    if (options && Object.keys(options).length > 0) {
-        (fn as any)[COMPUTED_CONFIG] = options;
-    }
-    return fn;
 }
 
 export function isPrefix(prefix: PropertyKey[], full: PropertyKey[]): boolean {
@@ -138,17 +130,9 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
     private initComputedProperties(): void {
         const original = this.Original as any;
         const proxy = this.Proxy as any;
-
         for (const key of Object.keys(original)) {
-            const val = original[key];
-
-            if (typeof val === "function" && val[COMPUTED_FLAG]) {
-                try {
-                    proxy[key]; // triggers evaluateComputed internally
-                } catch (e) {
-                    console.error("Error initializing computed:", key, e);
-                }
-            }
+            if (original[key] instanceof ComputedRR) 
+                try { proxy[key]; } catch (e) { console.error("Error initializing computed:", key, e); }
         }
     }
 
@@ -212,8 +196,8 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
      * @param newValue The new value.
      * @param oldValue The old value.
      */
-    private notify(path: PropertyKey[], newValue: any, oldValue: any): void {
-        if (newValue === oldValue) return; // No notification if no change
+    private notify(path: PropertyKey[], newValue: any, oldValue: any, force = false): void {
+        if (!force && newValue === oldValue) return;
 
         // Create a snapshot of subscriptions to avoid issues if some unsubscribe during notification.
         const subscriptions = Array.from(this.observerMap.values());
@@ -241,126 +225,64 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
     // --- Dependency Tracking ---
     // This method is called when a computed function has been set using computed()
     // with an options object. Starting point for easy computed function extensions.
-    private evaluateComputed(fn: Function, receiver: any, computedPath: PropertyKey[]): any {
-        const fnObj = fn as any;
-        const options = fnObj[COMPUTED_CONFIG];
+    private evaluateComputed(computed: ComputedRR, receiver: any, path: PropertyKey[]): any {
+        let state = this.computedStates.get(computed);
+        if (!state) {
+            state = { value: undefined, dirty: true, subs: [] };
+            this.computedStates.set(computed, state);
+        }
 
-        console.log("Evaluating computed for ", computedPath.join("."))
+        if (computed.cache && !state.dirty)
+            return state.value;
 
-        // options.cache should REALLY cache now with this short-circut :)
-        // Also swapped to a bool flag instead of fnObj.__cachedValue !== undefined
-        // If a cached computed's legitimate value is undefined, this check is always false, 
-        // so it "caches" undefined but then treats that as "not cached yet" forever — recomputing on every access 
-        if (options.cache && fnObj.__computedSubscriptions)
-            return fnObj.__cachedValue;
+        console.log("Evaluating computed for ", path.join("."))
 
         // If a computed function throws, computedContextStack permanently leaks a frame. 
-        // initComputedProperties() catches the error at the call site, but by then the stack is already corrupted
-        // every computed evaluated afterward in the app will read/write the wrong context, silently mis-attributing dependencies
+        // we really need to guard against stack getting corrupted - every computed evaluated afterward 
+        // in the app will read/write the wrong context, silently mis-attributing dependencies
         pushComputedContext(); // Begin dependency tracking.
         let result: any;
-        let computedContext: ComputedContext;
         try { 
-            result = fn.call(receiver); // Evaluate the computed function.  
+            result = computed.fn.call(receiver); // Evaluate the computed function.  
         }
-        catch (e) { console.error(`Error while calling ${computedPath.join(".")} -> ${e}`); }
+        catch (e) {
+            console.error(`Error while calling ${path.join(".")} -> ${e}`);
+        }
         finally {
-            computedContext = popComputedContext(); // Get the recorded dependencies.
+            const computedContext = popComputedContext(); // Get the recorded dependencies.
+            if (computed.cache)
+                this.trackDependencies(computed, receiver, path, computedContext.dependencies, state);
         }
 
-        // If caching is enabled, set up subscriptions to invalidate cache when any dependency changes.
-        if (options.cache) {
-            this.subscribeComputedDependencies(fn, receiver, computedPath, computedContext.dependencies);
-            fnObj.__cachedValue = result;
-            fnObj.__hasCachedValue = true;
-        }
-
+        state.value = result;
+        state.dirty = false;
         return result;
     }
 
-    // Pulled out so it can be called again on every recompute, not just the first one.
-    private subscribeComputedDependencies(
-        fn: Function,
-        receiver: any,
-        computedPath: PropertyKey[],
-        dependencies: Set<string>
-    ): void {
-        const fnObj = fn as any;
-
-        // Tear down last generation's subscriptions - the dependency set may
-        // differ this time around (e.g. a branch in the computed took a
-        // different path and read different properties).
-        if (fnObj.__computedSubscriptions) {
-            fnObj.__computedSubscriptions.forEach((sub: { unsubscribe: () => void }) => sub.unsubscribe());
-        }
-        fnObj.__computedSubscriptions = [];
-
+    private trackDependencies(computed: ComputedRR, receiver: any, path: PropertyKey[], dependencies: Set<string>, state: ComputedStateRR): void {
+        state.subs.forEach(x => x.unsubscribe());
+        state.subs = dependencies.size ? [] : state.subs;
+        
         dependencies.forEach((dep: string) => {
-            const subscription = this.subscribe(
+            const depParts = dep.split(".");
+            state.subs.push(this.subscribe(
                 () => {
-                    const oldValue = fnObj.__cachedValue;
-
-                    pushComputedContext(); 
-                    let newContext: ComputedContext;
-                    let newValue: any;
-                    try {
-                        newValue = fn.call(receiver); 
-                    }
-                    catch (e) { console.error(`Error while calling ${computedPath.join(".")} -> ${e}`); }
-                    finally {
-                        newContext = popComputedContext(); 
-                    }
-
-                    // Re-subscribe using this run's freshly tracked dependencies.
-                    this.subscribeComputedDependencies(fn, receiver, computedPath, newContext.dependencies);
-
-                    // Invalidate cached value when any dependency changes.
-                    fnObj.__cachedValue = newValue;
-                    this.notify(computedPath, newValue, oldValue);
+                    if (state.dirty) return; // already pending — avoid duplicate notifies
+                    const oldValue = state.value;
+                    state.dirty = true;
+                    this.notify(path, undefined, oldValue, true);
                 },
-                (changedPath) => {
-                    const depParts = dep.split(".");
-                    if (changedPath.length > 1) {
-                        return isPrefix([changedPath[0]], depParts);
-                    }
-                    return isPrefix(changedPath, depParts);
-                },
+                // TODO: revisit subscriptions and paths, still not sure if was an ok fix - taking only first part of the path
+                (changedPath) => changedPath.length > 1 ? isPrefix([changedPath[0]], depParts) : isPrefix(changedPath, depParts), 
                 undefined,
-                ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: "Computed", reason: "Computed dep. update!" } : undefined
-            );
-            fnObj.__computedSubscriptions.push(subscription);
+                ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: `Computed => ${computed.fn.name} `, reason: "Computed dep. update!" } : undefined
+            ));
         });
     }
-
-    // helper method that recursively traverses an object
-    // and cleans up computed subscriptions and cached values.
-    private cleanupComputedSubscriptions(obj: any, visited = new WeakSet<any>()): void {
-        if (obj && typeof obj === 'object' && !visited.has(obj)) {
-            visited.add(obj);
-            // Iterate all own properties (you might also want to include symbols, etc.)
-            for (const key of Object.keys(obj)) {
-                const value = obj[key];
-                if (typeof value === 'function') {
-                    // If this function has computed subscriptions, unsubscribe them.
-                    if (Array.isArray(value.__computedSubscriptions)) {
-                        value.__computedSubscriptions.forEach((sub: { unsubscribe: () => void }) => {
-                            sub.unsubscribe();
-                        });
-                        delete value.__computedSubscriptions;
-                        delete value.__cachedValue;
-                        delete value.__hasCachedValue;
-                    }
-                } else if (value && typeof value === 'object') {
-                    // Recursively clean computed subscriptions in nested objects.
-                    this.cleanupComputedSubscriptions(value, visited);
-                }
-            }
-        }
-    }
-
+     
     // public method to reset or dispose the current target and its proxies.
     public async resetTarget(newTarget: any): Promise<void> {
-        this.cleanupComputedSubscriptions(this.original);
+        this.computedStates.clear();
         this.unsubscribeAll();
 
         await this.emitParallel("beforeResetTarget");
@@ -393,7 +315,7 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
 
                 const fullPath = [...currentPath, prop];
 
-                // --- Dependency Tracking --- 
+                // --- Dependency tracking --- 
                 // If a computed function is being evaluated, record this property access.
                 if (computedContextStack.length > 0) {
                     const currentContext = computedContextStack[computedContextStack.length - 1];
@@ -406,17 +328,9 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
 
                 let value = Reflect.get(obj, prop, receiver);
 
-                // --- Computed Function Handling ---
-                // Check if the value is a function and is marked as computed.
-                if (typeof value === "function" && (value as any)[COMPUTED_FLAG] === true) {
-                    // If the function has options configured
-                    if ((value as any)[COMPUTED_CONFIG]) {
-                        // Delegate to evaluateComputed to handle options and dependency tracking.
-                        value = this.evaluateComputed(value, receiver, fullPath);
-                    } else {
-                        // Otherwise just call the function normally.
-                        value = value.call(receiver);
-                    }
+                // --- Computed handling ---
+                if (value instanceof ComputedRR) {
+                    value = this.evaluateComputed(value, receiver, fullPath);
                 } else if (value && typeof value === 'object' && !value.__isProxy) {
                     // Automatically wrap nested objects or arrays in a proxy.
                     const proxiedValue = this.createProxy(value, [...currentPath, prop]);
