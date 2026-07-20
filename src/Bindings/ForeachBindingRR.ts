@@ -125,8 +125,7 @@ export class ForeachBindingRR extends BindingRR {
                 }
             },
             filter,
-            undefined,
-            ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: this.element, reason: "Foreach binding update" } : undefined
+            undefined
         );
 
         this.addSub(this.subscription);

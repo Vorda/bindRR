@@ -197,8 +197,7 @@ export class BindingSourceRR {
                     // If any binding for this element is affected, return true
                     return nonForeachBindings.some(binding => this.isBindingAffected(changedPath, binding.config.path));
                 },
-                undefined,
-                ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: element, reason: "BindingSourceRR.applyBindings call" } : undefined
+                undefined
             );
 
             // Track subscription so it can be disposed with the element's bindings
@@ -219,8 +218,7 @@ export class BindingSourceRR {
                 }
                 return false;
             },
-            undefined,
-            ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: "Global validation", reason: "Update all validate-bound elements" } : undefined
+            undefined
         );
 
         // store global validation subscription on the BindingSourceRR instance so dispose() can clear it

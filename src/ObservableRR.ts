@@ -29,13 +29,6 @@ export function isPrefix(prefix: PropertyKey[], full: PropertyKey[]): boolean {
     return true;
 }
 
-export interface DebugInfo {
-    subscriber?: any; // e.g. reference to the subscribing element or object
-    reason?: string;  // a custom message indicating why the subscription was created
-    timestamp: number;
-    stack: string;
-}
-
 // The observer receives the full path to the changed property (as an array of keys),
 // the new value, and the old value.
 type ObserverRR = (
@@ -50,7 +43,6 @@ interface SubscriptionRR {
     // Optional filter: returns true if the subscriber cares about this change.
     filter?: (changedPath: PropertyKey[]) => boolean;
     errorHandler?: (error: Error, path: PropertyKey[], newValue: any, oldValue: any) => void;
-    debugInfo?: DebugInfo;
 }
 
 // Fully dynamic ignoring of properties from being trapped. By separating concerns like this
@@ -90,9 +82,6 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
     private nextObserverId: number = 0;
 
     private computedStates = new Map<ComputedRR, ComputedStateRR>();
-
-    // Set this flag to true during development to enable detailed logging.
-    public static DEBUG_SUBSCRIPTIONS: boolean = false;
 
     constructor(target: T, ignoreList?: ProxyManager) {
         super();
@@ -135,18 +124,10 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
     public subscribe(
         observer: ObserverRR,
         filter?: (changedPath: PropertyKey[]) => boolean,
-        errorHandler?: (error: Error, path: PropertyKey[], newValue: any, oldValue: any) => void,
-        debugInfo?: { subscriber?: any; reason?: string }
+        errorHandler?: (error: Error, path: PropertyKey[], newValue: any, oldValue: any) => void
     ): { unsubscribe: () => void } {
         const id = this.nextObserverId++;
-        const info: DebugInfo = Object.assign(
-            {
-                timestamp: Date.now(),
-                stack: new Error().stack || "no stack trace"
-            },
-            debugInfo
-        );
-        this.observerMap.set(id, { observer, filter, errorHandler, debugInfo: info });
+        this.observerMap.set(id, { observer, filter, errorHandler } );
 
         // Return an unsubscribe function that is idempotent.
         return {
@@ -221,8 +202,6 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
         if (computed.cache && !state.dirty)
             return state.value;
 
-        console.log("Evaluating computed for ", path.join("."))
-
         let result: any;
         try { 
             result = computed.fn.call(receiver); // Evaluate the computed function.  
@@ -249,8 +228,7 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                 // TODO: revisit if we need nested path precision (user.address.city and user.role for ex. now both just invalidate
                 // anything depending on user - we over-invalidate - harmless, just an extra recompute)
                 (changedPath) => changedPath[0] === key, 
-                undefined,
-                ObservableRR.DEBUG_SUBSCRIPTIONS ? { subscriber: `Computed => ${computed.fn.name} `, reason: `Computed dep. update (${String(key)})!` } : undefined
+                undefined
             ));
         });
     }
@@ -339,46 +317,6 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
             configurable: false,
         });
         return proxy;
-    }
-
-    private formatSubscriptionDebugInfo(id: number, sub: SubscriptionRR): string {
-        const info = sub.debugInfo;
-        if (!info) {
-            return `Subscription ${id}: No debug info available.`;
-        }
-
-        const timeStr = new Date(info.timestamp).toISOString();
-        const stackLine = info.stack.split("\n")[1]?.trim() || "no stack details";
-
-        return `Subscription ${id}:
-  - Subscriber: ${info.subscriber ? JSON.stringify(info.subscriber) : "N/A"}
-  - Reason: ${info.reason ? info.reason : "No reason provided"}
-  - Timestamp: ${timeStr}
-  - Stack: ${stackLine}`;
-    }
-
-    public listSubscriptionsDetailed(): void {
-        if (!ObservableRR.DEBUG_SUBSCRIPTIONS) {
-            console.log("Detailed subscription logging is disabled.");
-            return;
-        }
-
-        console.log("Current Subscriptions (Detailed):");
-        this.observerMap.forEach((sub, id) => {
-            console.log(this.formatSubscriptionDebugInfo(id, sub));
-        });
-    }
-
-    public listSubscriptions(): void {
-        if (!ObservableRR.DEBUG_SUBSCRIPTIONS) {
-            console.log("Detailed subscription logging is disabled.");
-            return;
-        }
-
-        console.log("Current Subscriptions:");
-        this.observerMap.forEach((sub, id) => {
-            console.log(`Subscription ${id}:`, sub.debugInfo);
-        });
     }
 }
 
