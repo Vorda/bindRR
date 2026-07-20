@@ -91,7 +91,8 @@ export class DataBinderRR {
         const injectToken = this.objectFactory.registerGeneric(ObservableRR, ctor, {
             parameterInstructions: [
                 { type: "inject", token: ctor },
-                { type: "inject", token: ProxyManager }
+                { type: "inject", token: ProxyManager },
+                { type: "external", defaultValue: key }
             ]
         });
 

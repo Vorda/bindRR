@@ -1,4 +1,10 @@
 ﻿import { AsyncEventEmitterRR } from "./EventEmitterRR";
+import { SubscriptionFilterRR, RootKeyFilterRR, AlwaysFilterRR } from "./Subscriptions/SubscriptionFilterRR";
+import { SubscriptionRR, SubscriptionSnapshot, SubscribeOptionsRR, ObserverRR } from "./Subscriptions/SubscriptionRR";
+import { SubscriptionRegistryRR, SubscriptionGraphRR } from "./Subscriptions/SubscriptionRegistryRR";
+import { CompositeSubscriptionRR } from "./Subscriptions/CompositeSubscriptionRR";
+import { isSubscriptionDebuggingEnabled } from "./Subscriptions/SubscriptionDebugFlag";
+export { isPrefix } from "./PathUtils"; // re-exported for backward compatibility with existing imports
 
 export class ComputedRR<T = any> {
     constructor(
@@ -16,33 +22,6 @@ interface ComputedStateRR {
     value: any;
     dirty: boolean;
     subs: { unsubscribe: () => void }[];
-}
-
-export function isPrefix(prefix: PropertyKey[], full: PropertyKey[]): boolean {
-    if (prefix.length > full.length)
-        return false;
-
-    for (let i = 0; i < prefix.length; i++) 
-        if (prefix[i] !== full[i])
-            return false;
-
-    return true;
-}
-
-// The observer receives the full path to the changed property (as an array of keys),
-// the new value, and the old value.
-type ObserverRR = (
-    path: PropertyKey[],
-    newValue: any,
-    oldValue: any
-) => void;
-
-// Define a subscription interface to associate each observer with an optional error handler.
-interface SubscriptionRR {
-    observer: ObserverRR;
-    // Optional filter: returns true if the subscriber cares about this change.
-    filter?: (changedPath: PropertyKey[]) => boolean;
-    errorHandler?: (error: Error, path: PropertyKey[], newValue: any, oldValue: any) => void;
 }
 
 // Fully dynamic ignoring of properties from being trapped. By separating concerns like this
@@ -78,18 +57,31 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
 
     private ignoreList: ProxyManager;
 
-    private observerMap: Map<number, SubscriptionRR> = new Map();
-    private nextObserverId: number = 0;
-
     private computedStates = new Map<ComputedRR, ComputedStateRR>();
 
-    constructor(target: T, ignoreList?: ProxyManager) {
+    // Fallback naming when no explicit label is given — matches the
+    // "menuAdmin:computed:3:filteredItems" format from a plain
+    // "Observable#4:computed:3:filteredItems" instead, still unique
+    // and still readable, just less meaningful than a caller-supplied name.
+    private static instanceCounter = 0;
+
+    public readonly label: string;
+    private readonly subscriptionRegistry: SubscriptionRegistryRR;
+
+
+    constructor(target: T, ignoreList?: ProxyManager, label?: string) {
         super();
+
+        this.label = label ?? `Observable#${ObservableRR.instanceCounter++}`;
+        this.subscriptionRegistry = new SubscriptionRegistryRR(this.label);
 
         this.ignoreList = ignoreList || new ProxyManager();
         this.original = target;
         this.proxy = this.createProxy(target);
 
+        // we don't need this anymore since switching computeds to lazy eval,
+        // but keeping it for a while for easier debugging - this way we run them 
+        // all at start and centralize computed debugging. 
         this.initComputedProperties();
     }
 
@@ -110,6 +102,20 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
         }
     }
 
+    // Returns nothing unless enableSubscriptionDebugging() has been called —
+    // see SubscriptionDebugFlag.ts. Empty array is the "off" state, not an error.
+    public getActiveSubscriptions(): SubscriptionSnapshot[] {
+        if (!isSubscriptionDebuggingEnabled())
+            return [];
+        return this.subscriptionRegistry.getSnapshot();
+    }
+
+    public getSubscriptionGraph(): SubscriptionGraphRR {
+        if (!isSubscriptionDebuggingEnabled())
+            return { observableLabel: this.label, nodes: [] };
+        return this.subscriptionRegistry.getGraph();
+    }
+
     /**
      * Subscribes an observer that will be notified on any change.
      * You may optionally provide an errorHandler that will be invoked if the observer throws.
@@ -121,24 +127,18 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
      * @param errorHandler An optional function to handle errors thrown in the observer.
      * @returns An object with an unsubscribe method.
      */
-    public subscribe(
-        observer: ObserverRR,
-        filter?: (changedPath: PropertyKey[]) => boolean,
-        errorHandler?: (error: Error, path: PropertyKey[], newValue: any, oldValue: any) => void
-    ): { unsubscribe: () => void } {
-        const id = this.nextObserverId++;
-        this.observerMap.set(id, { observer, filter, errorHandler } );
-
-        // Return an unsubscribe function that is idempotent.
-        return {
-            unsubscribe: () => {
-                this.observerMap.delete(id);
-            }
-        };
+    public subscribe(observer: ObserverRR, options?: SubscribeOptionsRR): SubscriptionRR {
+        return this.subscriptionRegistry.create(
+            options?.kind ?? "user",
+            options?.filter ?? new AlwaysFilterRR(),
+            observer,
+            options?.errorHandler,
+            options?.label
+        );
     }
 
     public unsubscribeAll(): void {
-        this.observerMap.clear();
+        this.subscriptionRegistry.clear(); // disposes each subscription properly (sets disposedAt), not just a bulk map wipe
     }
 
     /**
@@ -148,12 +148,11 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
      * @param subscriptions An array of subscription objects (the ones returned by subscribe).
      * @returns A composed subscription with an unsubscribe method.
      */
-    public static composeSubscriptions(subscriptions: { unsubscribe: () => void }[]): { unsubscribe: () => void } {
-        return {
-            unsubscribe: () => {
-                subscriptions.forEach((sub) => sub.unsubscribe());
-            }
-        };
+    public static composeSubscriptions(
+        subscriptions: { unsubscribe: () => void }[],
+        label?: string
+    ): CompositeSubscriptionRR {
+        return new CompositeSubscriptionRR(subscriptions, label);
     }
 
     /**
@@ -165,27 +164,10 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
     private notify(path: PropertyKey[], newValue: any, oldValue: any, force = false): void {
         if (!force && newValue === oldValue) return;
 
-        // Create a snapshot of subscriptions to avoid issues if some unsubscribe during notification.
-        const subscriptions = Array.from(this.observerMap.values());
-
-        for (const subscription of subscriptions) {
-            if (subscription.filter && !subscription.filter(path))
-                continue;
-
-            try {
-                subscription.observer(path, newValue, oldValue);
-            } catch (error) {
-                if (subscription.errorHandler) {
-                    try {
-                        subscription.errorHandler(error as Error, path, newValue, oldValue);
-                    } catch (ehError) {
-                        console.error("Error handler threw an error:", ehError);
-                    }
-                } else {
-                    console.error("Observer error:", error);
-                }
-            }
-        }
+        // getActive() already returns a fresh array, so this is
+        // still a safe snapshot even if a subscriber unsubscribes mid-loop.
+        for (const subscription of this.subscriptionRegistry.getActive())
+            subscription.invoke(path, newValue, oldValue);
     }
 
     // --- Dependency Tracking ---
@@ -224,11 +206,11 @@ export class ObservableRR<T> extends AsyncEventEmitterRR<ObservableRREvents> {
                     state.dirty = true;
                     this.notify(path, undefined, oldValue, true);
                 },
-                // broad: root key only, no isPrefix needed.
-                // TODO: revisit if we need nested path precision (user.address.city and user.role for ex. now both just invalidate
-                // anything depending on user - we over-invalidate - harmless, just an extra recompute)
-                (changedPath) => changedPath[0] === key, 
-                undefined
+                {
+                    filter: new RootKeyFilterRR(key),
+                    kind: "computed",
+                    label: computed.fn.name || path.join("."),
+                }
             ));
         });
     }

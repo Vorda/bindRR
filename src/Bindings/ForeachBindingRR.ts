@@ -1,6 +1,7 @@
 import { BindingSourceRR } from "../BindingSourceRR";
 import { ObservableRR } from "../ObservableRR";
 import { BindingRR } from "./BindingRR";
+import { PathPrefixFilterRR } from "../Subscriptions/SubscriptionFilterRR";
 
 // ForeachBinding: first-class foreach binding with lifecycle management.
 export class ForeachBindingRR extends BindingRR {
@@ -111,11 +112,6 @@ export class ForeachBindingRR extends BindingRR {
             this.subscription = undefined;
         }
 
-        // TODO: Need to flesh out and sort binding paths next (proper array and nested object handling)
-        const filter = (changedPath: PropertyKey[]) => {
-            return this.binder!.isBindingAffected(changedPath, this.config.path);
-        };
-
         this.subscription = this.binder!.Observable.subscribe(
             () => {
                 try {
@@ -124,8 +120,11 @@ export class ForeachBindingRR extends BindingRR {
                     console.error("Error rendering foreach:", e);
                 }
             },
-            filter,
-            undefined
+            {
+                filter: new PathPrefixFilterRR(this.config.path.split(".")),
+                kind: "binding",
+                label: `foreach:${this.config.path}`   
+            }
         );
 
         this.addSub(this.subscription);

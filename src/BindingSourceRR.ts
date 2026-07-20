@@ -4,6 +4,9 @@ import { EventBindingRR } from "./Bindings/EventBindingRR";
 import { ForeachBindingRR } from "./Bindings/ForeachBindingRR";
 import { SimpleBindingRR } from "./Bindings/SimpleBindingRR";
 import { ValueBindingRR } from "./Bindings/ValueBindingRR";
+import { PathPrefixFilterRR, AnyOfFilterRR, SubscriptionFilterRR } from "./Subscriptions/SubscriptionFilterRR";
+import { SubscriptionRR } from "./Subscriptions/SubscriptionRR";
+import { describeElement } from "./PathUtils";
 
 // BindingSourceRR 
 // - stores Binding instances per element
@@ -18,6 +21,14 @@ export class BindingSourceRR {
         this.observable.BeforeTargetChange(() => { this.dispose(); });
         this.observable.AfterTargetChange(() => { this.applyBindings(); })
     }
+
+    // Holds subscriptions that aren't tied to one specific bound element
+    // (currently just the global validation-trigger subscription). Replaces
+    // the previous approach of smuggling it into bindingMap via a throwaway
+    // BindingRR subclass instance keyed on document.documentElement, purely
+    // so it had somewhere to live for dispose() — that workaround existed
+    // only because subscriptions weren't first-class disposable objects yet.
+    private globalSubscriptions: SubscriptionRR[] = [];
 
     // Track all elements that have a "validate" binding.
     // TODO: probably should simplify validation
@@ -40,8 +51,8 @@ export class BindingSourceRR {
             const handlers = boundElem[EVENT_HANDLERS];
             if (handlers) {
                 Object.keys(handlers).forEach((key) => {
-                     const fn = handlers[key];
-                     if (fn)
+                    const fn = handlers[key];
+                    if (fn)
                         element.removeEventListener(key, fn);
                 });
                 boundElem[EVENT_HANDLERS] = {};
@@ -50,12 +61,16 @@ export class BindingSourceRR {
             const prevDisplay = boundElem[DISPLAY];
             if (prevDisplay !== undefined) {
                 element.style.display = prevDisplay;
-                boundElem[DISPLAY] = undefined;  
+                boundElem[DISPLAY] = undefined;
             }
         });
 
         this.bindingMap.clear();
         this.validateElements.clear();
+
+        this.globalSubscriptions.forEach((s) => s.unsubscribe());
+        this.globalSubscriptions = [];
+
     }
 
     // Helper function to traverse an object using an array of keys.
@@ -100,13 +115,6 @@ export class BindingSourceRR {
             });
     }
 
-    // Too tired for a proper algorithm, works for now with everything i tried :)
-    public isBindingAffected(changedPath: PropertyKey[], bindingPath: string): boolean {
-        const bindingParts = bindingPath.split(".");
-        // Return true if one array is a prefix of the other.
-        return isPrefix(changedPath, bindingParts) || isPrefix(bindingParts, changedPath);
-    }
-
     // Scan the DOM (or a root element) for all data-bind attributes and populate the bindingMap.
     public scanBindings(root?: Document | Element | DocumentFragment): void {
         const target = root || document;
@@ -123,7 +131,7 @@ export class BindingSourceRR {
         const bindingStr = el.getAttribute("data-bind");
         if (!bindingStr)
             return;
-        
+
         const configs = this.parseBindingString(bindingStr);
         const bindings: BindingRR[] = [];
 
@@ -132,8 +140,7 @@ export class BindingSourceRR {
         const templateConfig = configs.find(c => c.type === "itemTemplate" || c.type === "foreachTemplate");
         const modeConfig = configs.find(c => c.type === "foreachMode");
 
-        if (foreachConfig)
-        {
+        if (foreachConfig) {
             const fb = new ForeachBindingRR(el, foreachConfig);
             fb.attachBinder(this);
             bindings.push(fb);
@@ -193,11 +200,13 @@ export class BindingSourceRR {
             // We create a single subscription per element that re-applies all non-foreach bindings when needed.
             const subscription = this.observable.subscribe(
                 () => { nonForeachBindings.forEach(x => x.apply(context)); },
-                (changedPath) => {
-                    // If any binding for this element is affected, return true
-                    return nonForeachBindings.some(binding => this.isBindingAffected(changedPath, binding.config.path));
-                },
-                undefined
+                {
+                    filter: new AnyOfFilterRR(
+                        nonForeachBindings.map((b) => new PathPrefixFilterRR(b.config.path.split(".")))
+                    ),
+                    kind: "binding",
+                    label: describeElement(element),
+                }
             );
 
             // Track subscription so it can be disposed with the element's bindings
@@ -205,36 +214,32 @@ export class BindingSourceRR {
         });
 
         //Global subscription for updating validation bindings when any trigger changes.
-        const validationSub = this.observable.subscribe(
+        const validationSub =  this.observable.subscribe(
             () => this.updateValidationBindings(context),
-            (changedPath) => {
-                // Check if the changed property affects any validateTrigger.
-                for (let element of this.validateElements) {
-                    const bindings = this.bindingMap.get(element) || [];
-                    const triggerBinding = bindings.find(x => x.config.type === "validateTrigger");
-                    if (triggerBinding && this.isBindingAffected(changedPath, triggerBinding.config.path)) {
-                        return true;
-                    }
-                }
-                return false;
-            },
-            undefined
+            {
+                filter: this.buildValidationTriggerFilter(),
+                kind: "validation",
+                label: "validation-trigger-check",
+            }
         );
 
-        // store global validation subscription on the BindingSourceRR instance so dispose() can clear it
-        // (we keep it simple: push it into a dummy bindingMap entry keyed by document)
-        // TODO: need to refactor this and whole validation
-        const docKey = document.documentElement as HTMLElement;
-        const existing = this.bindingMap.get(docKey) || [];
-        
-        // create a lightweight binding to hold the subscription so it gets disposed with dispose()
-        const holder = new (class extends BindingRR {
-            apply() { }
-        })(docKey, { type: "__internal", path: "" });
-        holder.attachBinder(this);
-        holder.addSub(validationSub);
-        existing.push(holder);
-        this.bindingMap.set(docKey, existing);
+        this.globalSubscriptions.push(validationSub);
+    }
+
+    // Built once per applyBindings() call from whatever validateTrigger
+    // bindings currently exist. If none exist, AnyOfFilterRR([]) never
+    // matches — identical to today's behavior (no trigger = no reactive
+    // re-check, only the initial apply), just precomputed instead of
+    // re-scanning validateElements on every single notify.
+    private buildValidationTriggerFilter(): SubscriptionFilterRR {
+        const triggerFilters: SubscriptionFilterRR[] = [];
+        for (const element of this.validateElements) {
+            const bindings = this.bindingMap.get(element) || [];
+            const triggerBinding = bindings.find((x) => x.config.type === "validateTrigger");
+            if (triggerBinding)
+                triggerFilters.push(new PathPrefixFilterRR(triggerBinding.config.path.split(".")));
+        }
+        return new AnyOfFilterRR(triggerFilters);
     }
 
     // Iterates over all elements in our validateElements set and updates only their "validate" binding.
@@ -243,7 +248,7 @@ export class BindingSourceRR {
             const bindings = this.bindingMap.get(element);
             if (bindings) {
                 const validateBinding = bindings.find(x => x.config.type === "validate");
-                if (validateBinding) 
+                if (validateBinding)
                     validateBinding.apply(context);
             }
         });
